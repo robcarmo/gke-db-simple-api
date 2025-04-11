@@ -79,7 +79,7 @@ jobs:
             exit 1
           fi
 
-      # --- End-to-End Test Service 'hello-world' ---
+      # --- End-to-End Test API Endpoints ---
       - name: End-to-End Test API Endpoints
         id: api-test
         run: |
@@ -88,7 +88,7 @@ jobs:
           WAIT_INTERVAL=15 # Increased interval slightly
 
           if ! [[ "$TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
-            echo "Error: Invalid timeout value '$TIMEOUT_SECONDS'. Must be a positive integer."
+            echo "::error::Invalid timeout value '$TIMEOUT_SECONDS'. Must be a positive integer."
             exit 1
           fi
           MAX_WAIT_ITERATIONS=$(( TIMEOUT_SECONDS / WAIT_INTERVAL ))
@@ -104,7 +104,7 @@ jobs:
               break
             fi
             if [[ $i -eq $MAX_WAIT_ITERATIONS ]]; then
-               echo "Error: Timed out waiting for External IP for service 'hello-world' after approx ${TIMEOUT_SECONDS} seconds."
+               echo "::error::Timed out waiting for External IP for service 'hello-world' after approx ${TIMEOUT_SECONDS} seconds."
                kubectl get service hello-world -o wide
                exit 1
             fi
@@ -112,10 +112,11 @@ jobs:
             sleep $WAIT_INTERVAL
           done
           if [[ -z "$EXTERNAL_IP" ]]; then
-            echo "Error: External IP was not obtained after loop completion."
+            echo "::error::External IP was not obtained after loop completion."
             exit 1
           fi
-          echo "::set-output name=external_ip::$EXTERNAL_IP" # Set output for potential later steps
+          # Set output using environment file
+          echo "external_ip=$EXTERNAL_IP" >> $GITHUB_OUTPUT
 
           # --- API Tests ---
           echo "--- Testing API Endpoints against http://$EXTERNAL_IP ---"
@@ -142,7 +143,8 @@ jobs:
             exit 1
           fi
           echo "Created Task ID: $TASK_ID"
-          echo "::set-output name=task_id::$TASK_ID" # Save task ID as output
+          # Set output using environment file
+          echo "task_id=$TASK_ID" >> $GITHUB_OUTPUT
 
 
           # Test 2: GET specific data
@@ -177,7 +179,8 @@ jobs:
             echo "Response Body: $GET_ALL_BODY"
             exit 1
           fi
-          CONTAINS_ID=$(echo "$GET_ALL_BODY" | jq --argjson id "$TASK_ID" 'map(select(.id==$id)) | length')
+          # FIX: Use --arg (string) instead of --argjson (number) for the ID comparison
+          CONTAINS_ID=$(echo "$GET_ALL_BODY" | jq --arg id "$TASK_ID" 'map(select(.id==$id)) | length')
           if [[ "$CONTAINS_ID" -eq 0 ]]; then
              echo "::error::GET /data response did not contain the created task ID ($TASK_ID)."
              echo "Response Body: $GET_ALL_BODY"
