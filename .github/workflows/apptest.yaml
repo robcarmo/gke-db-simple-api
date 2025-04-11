@@ -1,0 +1,207 @@
+name: Manual App Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster_name:
+        description: 'GKE Cluster Name'
+        required: true
+        default: 'basic-gke-cluster' # Update default if your cluster name is different
+        type: string
+      location:
+        description: 'GCP Region'
+        required: true
+        default: 'us-east1' # Update default if your region is different
+        type: string
+      project_id:
+        description: 'GCP Project ID'
+        required: true
+        default: 'gen-lang-client-0683956833' # Replace with your project ID or use secrets/vars
+        type: string
+      timeout:
+        description: 'Test Timeout (seconds)'
+        required: true
+        default: '300' # Keep as string, shell will handle conversion/validation
+        type: string
+
+jobs:
+  cluster-verification:
+    # Define permissions required for google-github-actions/auth
+    permissions:
+      contents: 'read'
+      id-token: 'write' # Required for workload identity federation or SA key auth
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate Inputs
+        run: |
+          echo "Testing cluster: ${{ github.event.inputs.cluster_name }}"
+          echo "Region: ${{ github.event.inputs.location }}"
+          echo "Project ID: ${{ github.event.inputs.project_id }}"
+          echo "Timeout: ${{ github.event.inputs.timeout }} seconds"
+
+      # --- Authentication ---
+      # Using Service Account Key JSON (ensure secret is properly configured)
+      - name: Authenticate to Google Cloud (SA Key)
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }} # Ensure this secret exists in your GitHub repo/org settings
+
+      # --- GKE Access ---
+      - name: Configure GKE Access
+        uses: google-github-actions/get-gke-credentials@v1
+        with:
+          cluster_name: ${{ github.event.inputs.cluster_name }}
+          location: ${{ github.event.inputs.location }}
+          project_id: ${{ github.event.inputs.project_id }}
+          # Uses credentials set up by the 'auth' step automatically
+
+      # --- Deployment Verification ---
+      - name: Verify Deployment 'hello-world'
+        run: |
+          echo "Verifying deployment 'hello-world' has 1 available replica..."
+          # Wait briefly for kubectl context to be fully ready (optional but can help)
+          sleep 5
+          AVAILABLE_REPLICAS=$(kubectl get deployment hello-world -o jsonpath='{.status.availableReplicas}' 2>/dev/null || echo "0") # Default to 0 if command fails
+
+          if [[ "$AVAILABLE_REPLICAS" -eq 1 ]]; then
+            echo "Deployment verification successful."
+          else
+            echo "Error: Expected 1 available replica for deployment 'hello-world', found $AVAILABLE_REPLICAS"
+            echo "--- Deployment Status ---"
+            kubectl get deployment hello-world -o wide
+            echo "--- Deployment YAML ---"
+            kubectl get deployment hello-world -o yaml
+            echo "--- Pods Status ---"
+            kubectl get pods -l app=hello-world # Assuming deployment uses this label selector
+            exit 1
+          fi
+
+      # --- End-to-End Test Service 'hello-world' ---
+      - name: End-to-End Test API Endpoints
+        id: api-test
+        run: |
+          # Get inputs and validate timeout
+          TIMEOUT_SECONDS="${{ github.event.inputs.timeout }}"
+          WAIT_INTERVAL=15 # Increased interval slightly
+
+          if ! [[ "$TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Error: Invalid timeout value '$TIMEOUT_SECONDS'. Must be a positive integer."
+            exit 1
+          fi
+          MAX_WAIT_ITERATIONS=$(( TIMEOUT_SECONDS / WAIT_INTERVAL ))
+
+          # 1. Get External IP
+          echo "Attempting to get External IP for service 'hello-world' (max wait: ${TIMEOUT_SECONDS}s)..."
+          EXTERNAL_IP=""
+          for (( i=1; i<=MAX_WAIT_ITERATIONS; i++ )); do
+            IP_JSON=$(kubectl get service hello-world -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+            if [[ -n "$IP_JSON" && "$IP_JSON" != "null" && "$IP_JSON" != "<none>" ]]; then
+              EXTERNAL_IP="$IP_JSON"
+              echo "Found External IP: $EXTERNAL_IP"
+              break
+            fi
+            if [[ $i -eq $MAX_WAIT_ITERATIONS ]]; then
+               echo "Error: Timed out waiting for External IP for service 'hello-world' after approx ${TIMEOUT_SECONDS} seconds."
+               kubectl get service hello-world -o wide
+               exit 1
+            fi
+            echo "Still waiting for External IP ($(( i * WAIT_INTERVAL ))s / ${TIMEOUT_SECONDS}s)..."
+            sleep $WAIT_INTERVAL
+          done
+          if [[ -z "$EXTERNAL_IP" ]]; then
+            echo "Error: External IP was not obtained after loop completion."
+            exit 1
+          fi
+          echo "::set-output name=external_ip::$EXTERNAL_IP" # Set output for potential later steps
+
+          # --- API Tests ---
+          echo "--- Testing API Endpoints against http://$EXTERNAL_IP ---"
+          TASK_DESCRIPTION="Test task from CI $(date +%s)" # Add timestamp for uniqueness
+
+          # Test 1: POST data
+          echo "Testing POST /data..."
+          POST_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" \
+            -d "{\"description\": \"$TASK_DESCRIPTION\"}" \
+            "http://${EXTERNAL_IP}/data")
+          POST_HTTP_CODE=$(echo "$POST_RESPONSE" | tail -n1)
+          POST_BODY=$(echo "$POST_RESPONSE" | sed '$d')
+
+          if [[ "$POST_HTTP_CODE" -ne 201 ]]; then
+            echo "::error::POST /data failed! Expected 201, got $POST_HTTP_CODE"
+            echo "Response Body: $POST_BODY"
+            exit 1
+          fi
+          echo "POST /data successful (HTTP $POST_HTTP_CODE)."
+          TASK_ID=$(echo "$POST_BODY" | jq -r '.id')
+          if [[ -z "$TASK_ID" || "$TASK_ID" == "null" ]]; then
+            echo "::error::Could not extract task ID from POST response."
+            echo "Response Body: $POST_BODY"
+            exit 1
+          fi
+          echo "Created Task ID: $TASK_ID"
+          echo "::set-output name=task_id::$TASK_ID" # Save task ID as output
+
+
+          # Test 2: GET specific data
+          echo "Testing GET /data/$TASK_ID..."
+          GET_ID_RESPONSE=$(curl -s -w "\n%{http_code}" "http://${EXTERNAL_IP}/data/${TASK_ID}")
+          GET_ID_HTTP_CODE=$(echo "$GET_ID_RESPONSE" | tail -n1)
+          GET_ID_BODY=$(echo "$GET_ID_RESPONSE" | sed '$d')
+
+          if [[ "$GET_ID_HTTP_CODE" -ne 200 ]]; then
+            echo "::error::GET /data/$TASK_ID failed! Expected 200, got $GET_ID_HTTP_CODE"
+            echo "Response Body: $GET_ID_BODY"
+            exit 1
+          fi
+          GET_ID_DESC=$(echo "$GET_ID_BODY" | jq -r '.description')
+          if [[ "$GET_ID_DESC" != "$TASK_DESCRIPTION" ]]; then
+             echo "::error::GET /data/$TASK_ID returned wrong description: '$GET_ID_DESC'"
+             echo "Expected: '$TASK_DESCRIPTION'"
+             echo "Response Body: $GET_ID_BODY"
+             exit 1
+          fi
+          echo "GET /data/$TASK_ID successful (HTTP $GET_ID_HTTP_CODE)."
+
+
+          # Test 3: GET all data
+          echo "Testing GET /data..."
+          GET_ALL_RESPONSE=$(curl -s -w "\n%{http_code}" "http://${EXTERNAL_IP}/data")
+          GET_ALL_HTTP_CODE=$(echo "$GET_ALL_RESPONSE" | tail -n1)
+          GET_ALL_BODY=$(echo "$GET_ALL_RESPONSE" | sed '$d')
+
+          if [[ "$GET_ALL_HTTP_CODE" -ne 200 ]]; then
+            echo "::error::GET /data failed! Expected 200, got $GET_ALL_HTTP_CODE"
+            echo "Response Body: $GET_ALL_BODY"
+            exit 1
+          fi
+          CONTAINS_ID=$(echo "$GET_ALL_BODY" | jq --argjson id "$TASK_ID" 'map(select(.id==$id)) | length')
+          if [[ "$CONTAINS_ID" -eq 0 ]]; then
+             echo "::error::GET /data response did not contain the created task ID ($TASK_ID)."
+             echo "Response Body: $GET_ALL_BODY"
+             exit 1
+          fi
+          echo "GET /data successful (HTTP $GET_ALL_HTTP_CODE) and contains created task."
+
+
+          # Test 4: Check original '/' endpoint still works
+           echo "Testing GET /..."
+           GET_ROOT_RESPONSE=$(curl -s -w "\n%{http_code}" "http://${EXTERNAL_IP}/")
+           GET_ROOT_HTTP_CODE=$(echo "$GET_ROOT_RESPONSE" | tail -n1)
+           GET_ROOT_BODY=$(echo "$GET_ROOT_RESPONSE" | sed '$d')
+
+           if [[ "$GET_ROOT_HTTP_CODE" -ne 200 ]]; then
+              echo "::error::GET / failed! Expected 200, got $GET_ROOT_HTTP_CODE"
+              echo "Response Body: $GET_ROOT_BODY"
+              exit 1
+           fi
+           if [[ "$GET_ROOT_BODY" != *"Hello World! Service is running."* ]]; then
+              echo "::error::GET / response body unexpected: $GET_ROOT_BODY"
+              exit 1
+           fi
+           echo "GET / successful."
+
+
+          echo "--- API Endpoint Tests Passed ---"
