@@ -6,7 +6,7 @@ on:
       cluster_name:
         description: 'GKE Cluster Name'
         required: true
-        default: 'basic-gke-cluster' # Update default if your cluster name is different
+        default: 'gke-cluster' # Update default if your cluster name is different
         type: string
       location:
         description: 'GCP Region'
