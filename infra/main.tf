@@ -87,7 +87,7 @@ resource "google_firestore_database" "database" {
   location_id                 = var.region  # Match GKE cluster region
   type                        = "DATASTORE_MODE"
   app_engine_integration_mode = "DISABLED"
-  # delete_protection_state = "DELETE_PROTECTION_DISABLED" # Optional: Useful for dev/test
+  delete_protection_state = "DELETE_PROTECTION_DISABLED" # Optional: Useful for dev/test
   # concurrency_mode              = "OPTIMISTIC" # Optional settings
   # point_in_time_recovery_enablement = "POINT_IN_TIME_RECOVERY_ENABLED" # Optional settings
 }
