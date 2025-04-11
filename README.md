@@ -1,62 +1,86 @@
-# GKE Database Simple API
+# GKE-DB-Simple-API
 
-A Node.js API application deployed on Google Kubernetes Engine (GKE) with Infrastructure as Code using Terraform.
+This repository contains a simple Node.js application deployed on Google Kubernetes Engine (GKE) with a fully automated CI/CD pipeline using GitHub Actions. The project integrates Google Cloud services, Kubernetes, and Terraform to provide a scalable and efficient deployment workflow.
 
 ## Repository Structure
+
 ```
-.github/workflows/  # GitHub Actions CI/CD workflows
-app/               # Node.js application code
-infra/            # Terraform infrastructure code
-k8s/              # Kubernetes deployment manifests
+.
+├── .github/workflows/    # GitHub Actions workflows for CI/CD
+├── app/                  # Node.js application source code
+├── infra/                # Terraform configuration for GKE and related infrastructure
+└── k8s/                  # Kubernetes manifests for application deployment
 ```
 
 ## Features
-- Node.js REST API application
-- Infrastructure as Code using Terraform
-- Kubernetes deployment on GKE
-- Automated CI/CD with GitHub Actions
 
-## Setup
-1. Install prerequisites:
-   - Node.js
-   - Docker
-   - Terraform
-   - Google Cloud SDK
-   - kubectl
+### Node.js Application
+- A simple REST API built with Node.js and Express.
+- Uses Google Cloud Datastore for data persistence.
+- Exposes endpoints for CRUD operations:
+  - `GET /`: Health check endpoint.
+  - `POST /data`: Create a new task.
+  - `GET /data/:id`: Retrieve a task by ID.
+  - `GET /data`: Retrieve all tasks.
 
-2. Configure Google Cloud credentials
-3. Clone repository
-4. Run `npm install` in the app directory
+### Infrastructure as Code (IaC)
+- Terraform is used to provision:
+  - GKE cluster
+  - Google Artifact Registry
+  - Google Cloud Datastore
+  - Service accounts with IAM roles
 
-## Infrastructure Deployment
-```bash
-cd infra
-terraform init
-terraform plan
-terraform apply
-```
+### Kubernetes Deployment
+- Kubernetes manifests for:
+  - Application deployment
+  - LoadBalancer service
 
-## Application Deployment
-The application is automatically deployed through GitHub Actions workflows:
-- `app-build.yaml`: Builds and tests the application
-- `deploy-k8s.yaml`: Deploys to Kubernetes
-- `infra-deploy.yaml`: Deploys infrastructure
-- `infra-destroy.yaml`: Destroys infrastructure
+### CI/CD Pipelines
+GitHub Actions workflows:
+- Infrastructure Management:
+  - `infra-deploy.yaml`: Deploys GKE infrastructure
+  - `infra-destroy.yaml`: Destroys the infrastructure
+- Application Deployment:
+  - `app-build.yaml`: Builds and pushes Docker image
+  - `deploy-k8s.yaml`: Deploys to GKE
+- Testing:
+  - `apptest.yaml`: End-to-end tests
+  - `cluster-test.yaml`: Cluster configuration tests
 
-## API Endpoints
-The application exposes a simple REST API:
-- GET /: Health check endpoint
-- Additional endpoints defined in app/app.js
+## Prerequisites
+- Google Cloud Platform account
+- GitHub account
+- `gcloud` CLI
+- `kubectl`
+- Terraform
 
-## Infrastructure
-- Google Kubernetes Engine cluster
-- Defined in infra/main.tf
-- Outputs available in infra/outputs.tf
+## Configuration
 
-## Contributing
-1. Fork the repository
-2. Create a feature branch
-3. Submit a pull request
+### Google Cloud Setup
+1. Enable required APIs:
+   - Google Kubernetes Engine API
+   - Artifact Registry API
+   - Cloud Datastore API
+2. Create GKE cluster and Artifact Registry
+3. Configure Workload Identity Federation
 
-## License
-MIT License
+### GitHub Secrets
+Required secrets:
+- `GCP_PROJECT_ID`
+- `GCP_SA_KEY`
+- `GCP_REGION`
+- `GCP_BK_TF`
+
+## Usage
+
+1. Deploy Infrastructure:
+   - Run `infra-deploy.yaml` workflow
+
+2. Deploy Application:
+   - Push to main branch to trigger deployment
+
+3. Test Application:
+   - Run `apptest.yaml` workflow
+
+4. Cleanup:
+   - Run `infra-destroy.yaml` workflow
