@@ -1,0 +1,94 @@
+name: Deploy Infrastructure
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'infra/**'
+  workflow_dispatch:  # Allows manual triggering
+
+jobs:
+  deploy-infra:
+    name: Deploy Infra to GCP
+    runs-on: ubuntu-latest
+    permissions:
+      contents: 'read' # Read repository content
+      # id-token: 'write' # Needed only if using Workload Identity Federation
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: '1.0.0' # Consider using a newer version if possible
+
+      # Setup gcloud CLI - often helpful for the Terraform provider
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v1
+        # version: 'latest' # Default is latest, so this line is optional
+
+      # This check is mostly for debugging, can be removed if not needed
+      - name: Check if GCP_SA_KEY secret is available
+        run: |
+          if [ -z "${{ secrets.GCP_SA_KEY }}" ]; then
+            echo "::error::GCP_SA_KEY secret is not set or empty!"
+            exit 1
+          else
+            echo "GCP_SA_KEY secret is present."
+          fi
+
+      - name: Authenticate to GCP
+        id: auth
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          # export_environment_variables: true # Usually default or handled internally
+          # create_credentials_file: true # Usually default or handled internally
+
+      # --- Terraform Steps run inside the 'infra' directory ---
+
+      - name: Terraform Init
+        id: init
+        # It's best practice to store the bucket name in secrets too
+        run: terraform init -backend-config="bucket=${{ secrets.GCP_BK_TF }}" # <-- USE A SECRET HERE
+        working-directory: ./infra # <-- Run this command inside the infra directory
+        env:
+          # Set GOOGLE_PROJECT for the provider, using a secret
+          GOOGLE_PROJECT: ${{ secrets.GCP_PROJECT_ID }} # <-- CREATE AND USE THIS SECRET
+          # Pass other TF variables needed by your configuration
+          TF_VAR_region: us-east1 # Use secrets if this changes per environment
+          TF_VAR_tfstate_bucket_name: ${{ secrets.GCP_BK_TF }}
+
+
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate
+        working-directory: ./infra # <-- Run inside infra
+        env:
+          GOOGLE_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan -out=tfplan
+        working-directory: ./infra # <-- Run inside infra
+        env:
+          GOOGLE_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+          TF_VAR_region: us-east1
+          TF_VAR_project_id: ${{ secrets.GCP_PROJECT_ID }} # Uncomment if needed
+          TF_VAR_tfstate_bucket_name: ${{ secrets.GCP_BK_TF }}
+
+
+      - name: Terraform Apply
+        # Add conditions if you don't want apply on every push, e.g.:
+        # if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        id: apply
+        run: terraform apply -auto-approve tfplan
+        working-directory: ./infra # <-- Run inside infra
+        env:
+          GOOGLE_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+          TF_VAR_region: us-east1
+          TF_VAR_project_id: ${{ secrets.GCP_PROJECT_ID }} # Uncomment if needed
+          TF_VAR_tfstate_bucket_name: ${{ secrets.GCP_BK_TF }}

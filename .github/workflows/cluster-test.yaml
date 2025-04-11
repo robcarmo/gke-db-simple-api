@@ -1,0 +1,172 @@
+name: Manual Cluster Verification
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster_name:
+        description: 'GKE Cluster Name'
+        required: true
+        default: 'basic-gke-cluster'
+        type: string # Explicitly type inputs if desired
+      location:
+        description: 'GCP Region'
+        required: true
+        default: 'us-east1'
+        type: string
+      timeout:
+        description: 'Test Timeout (seconds)'
+        required: true
+        default: '300' # Keep as string, shell will handle conversion/validation
+        type: string
+
+jobs:
+  cluster-verification:
+    # Define permissions required for google-github-actions/auth
+    permissions:
+      contents: 'read'
+      id-token: 'write' # Required for workload identity federation
+      # Add other permissions if your SA Key needs them for specific GCP resources
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate Inputs
+        run: |
+          echo "Testing cluster: ${{ github.event.inputs.cluster_name }}"
+          echo "Region: ${{ github.event.inputs.location }}"
+          echo "Timeout: ${{ github.event.inputs.timeout }} seconds"
+          # Add basic validation for timeout input in the test step below
+
+      # --- Authentication ---
+      # Recommended: Use Workload Identity Federation (requires setup in GCP)
+      # - name: Authenticate to Google Cloud (WIF)
+      #   id: auth
+      #   uses: google-github-actions/auth@v2
+      #   with:
+      #     workload_identity_provider: 'projects/YOUR_GCP_PROJECT_ID/locations/global/workloadIdentityPools/YOUR_POOL_ID/providers/YOUR_PROVIDER_ID'
+      #     service_account: 'your-service-account@your-gcp-project-id.iam.gserviceaccount.com'
+
+      # Alternative: Use Service Account Key JSON (ensure secret is properly configured)
+      - name: Authenticate to Google Cloud (SA Key)
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }} # Ensure this secret exists in your GitHub repo/org settings
+
+      # --- GKE Access ---
+      - name: Configure GKE Access
+        uses: google-github-actions/get-gke-credentials@v1
+        with:
+          cluster_name: ${{ github.event.inputs.cluster_name }}
+          location: ${{ github.event.inputs.location }}
+          # Uses credentials set up by the 'auth' step automatically
+
+      # --- Deployment Verification ---
+      - name: Verify Deployment 'hello-world'
+        run: |
+          echo "Verifying deployment 'hello-world' has 1 available replica..."
+          # Wait briefly for kubectl context to be fully ready (optional but can help)
+          sleep 5
+          AVAILABLE_REPLICAS=$(kubectl get deployment hello-world -o jsonpath='{.status.availableReplicas}' 2>/dev/null || echo "0") # Default to 0 if command fails
+
+          if [[ "$AVAILABLE_REPLICAS" -eq 1 ]]; then
+            echo "Deployment verification successful."
+          else
+            echo "Error: Expected 1 available replica for deployment 'hello-world', found $AVAILABLE_REPLICAS"
+            echo "--- Deployment Status ---"
+            kubectl get deployment hello-world -o wide
+            echo "--- Deployment YAML ---"
+            kubectl get deployment hello-world -o yaml
+            echo "--- Pods Status ---"
+            kubectl get pods -l app=hello-world # Assuming deployment uses this label selector
+            exit 1
+          fi
+
+      # --- End-to-End Test ---
+      - name: End-to-End Test Service 'hello-world'
+        run: |
+          # Get inputs and validate
+          TIMEOUT_SECONDS="${{ github.event.inputs.timeout }}"
+          WAIT_INTERVAL=10
+
+          # Basic validation that timeout is a positive integer
+          if ! [[ "$TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Error: Invalid timeout value '$TIMEOUT_SECONDS'. Must be a positive integer."
+            exit 1
+          fi
+
+          # Calculate max wait iterations based on timeout and interval
+          MAX_WAIT_ITERATIONS=$(( TIMEOUT_SECONDS / WAIT_INTERVAL ))
+
+          echo "Attempting to get External IP for service 'hello-world' (max wait: ${TIMEOUT_SECONDS}s)..."
+          EXTERNAL_IP="" # Initialize variable
+          for (( i=1; i<=MAX_WAIT_ITERATIONS; i++ )); do
+            # Query for the IP address; use || true to prevent script exit on transient errors
+            IP_JSON=$(kubectl get service hello-world -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+
+            # Check if IP_JSON is not empty and not a literal null/none string (GKE might return empty initially)
+            if [[ -n "$IP_JSON" && "$IP_JSON" != "null" && "$IP_JSON" != "<none>" ]]; then
+              EXTERNAL_IP="$IP_JSON"
+              echo "Found External IP: $EXTERNAL_IP"
+              break # Exit loop once IP is found
+            fi
+
+            # Check if we've reached the max iterations without finding an IP
+            if [[ $i -eq $MAX_WAIT_ITERATIONS ]]; then
+               echo "Error: Timed out waiting for External IP for service 'hello-world' after approx ${TIMEOUT_SECONDS} seconds."
+               echo "--- Service Status ---"
+               kubectl get service hello-world -o wide
+               echo "--- Service YAML ---"
+               kubectl get service hello-world -o yaml
+               exit 1
+            fi
+
+            # If IP not found yet and timeout not reached, wait and retry
+            echo "Still waiting for External IP ($(( i * WAIT_INTERVAL ))s / ${TIMEOUT_SECONDS}s)..."
+            sleep $WAIT_INTERVAL
+          done
+
+          # Final safety check - should not be reached if loop logic is correct, but good practice
+          if [[ -z "$EXTERNAL_IP" ]]; then
+            echo "Error: External IP was not obtained after loop completion. This indicates an unexpected state."
+            exit 1
+          fi
+
+          echo "Running curl test with overall timeout: ${TIMEOUT_SECONDS}s against IP: ${EXTERNAL_IP}"
+
+          # Export variables needed inside the bash -c scriptlet's environment
+          export EXTERNAL_IP
+          export TIMEOUT_SECONDS
+
+          # Use the 'timeout' utility to enforce the overall duration limit for the curl command.
+          # The script inside '...' will inherit the exported variables.
+          # Double-quote variables inside the scriptlet for safety, especially $EXTERNAL_IP.
+          timeout "${TIMEOUT_SECONDS}s" bash -c ' \
+            echo "Executing: curl -s http://$EXTERNAL_IP --retry 5 --retry-delay 10 --max-time $TIMEOUT_SECONDS --fail --show-error | grep Hello World!" ; \
+            curl -s "http://$EXTERNAL_IP" \
+              --retry 5 \
+              --retry-delay 10 \
+              --max-time "$TIMEOUT_SECONDS" \
+              --fail \
+              --show-error \
+            | grep --color=never "Hello World!" \
+          '
+          # Capture the exit code of the 'timeout' command itself
+          TIMEOUT_EXIT_CODE=$?
+
+          # Check the exit code from the 'timeout' command
+          if [[ $TIMEOUT_EXIT_CODE -eq 0 ]]; then
+             # Command completed successfully within the time limit
+             echo "End-to-End test successful!"
+          elif [[ $TIMEOUT_EXIT_CODE -eq 124 ]]; then
+             # 124 is the specific exit code when 'timeout' kills the process due to time limit
+             echo "Error: End-to-End test command TIMED OUT after $TIMEOUT_SECONDS seconds."
+             exit 1
+          else
+             # Any other non-zero exit code means curl or grep failed *before* the time limit was reached
+             echo "Error: End-to-End test command FAILED with exit code $TIMEOUT_EXIT_CODE (before timeout)."
+             # Attempt one last curl without grep/timeout to see the raw output for debugging
+             echo "Attempting final diagnostic curl:"
+             curl -v "http://$EXTERNAL_IP" --connect-timeout 10 --max-time 30 || echo "Diagnostic curl also failed or timed out."
+             exit 1
+          fi

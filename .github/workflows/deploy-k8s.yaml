@@ -1,0 +1,82 @@
+name: Deploy to GKE
+
+on:
+  # Trigger 1: Direct push to relevant directories
+  push:
+    branches:
+      - main # Specify branches to deploy from (e.g., main, master)
+    paths:
+      - 'app/**'
+      - 'k8s/**'
+
+  # Trigger 2: Completion of the build workflow
+  workflow_run:
+    workflows: ["Build and Push App Container"] # Exact name of the build workflow
+    types:
+      - completed # Only trigger when the build workflow finishes
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    # CONDITION: Run this job IF
+    # 1. The trigger was a 'push' event (to the specified branches/paths)
+    # OR
+    # 2. The trigger was a 'workflow_run' event AND the workflow completed successfully
+    if: github.event_name == 'push' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+
+    # Permissions needed for google-github-actions/auth
+    permissions:
+      contents: 'read'
+      id-token: 'write' # Required for Workload Identity Federation (preferred) or SA key auth
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4 # Use latest major version
+
+      # Decide whether to checkout the triggering workflow's code (if workflow_run)
+      # This is useful if the build workflow ran on a different commit/branch
+      # and you want to deploy the k8s manifests from *that* commit.
+      # If you always want to deploy manifests from the *current* branch (e.g., main),
+      # you might skip this conditional checkout.
+      - name: Checkout code from Workflow Run (if applicable)
+        uses: actions/checkout@v4
+        if: github.event_name == 'workflow_run'
+        with:
+          # Checkout the commit that triggered the 'Build and Push' workflow
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      # --- Authentication ---
+      # Recommended: Use Workload Identity Federation (requires setup in GCP)
+      # - name: Authenticate to Google Cloud (WIF)
+      #   id: auth
+      #   uses: google-github-actions/auth@v2 # Use latest major version
+      #   with:
+      #     workload_identity_provider: 'projects/YOUR_GCP_PROJECT_ID/locations/global/workloadIdentityPools/YOUR_POOL_ID/providers/YOUR_PROVIDER_ID'
+      #     service_account: 'your-gke-deploy-sa@YOUR_GCP_PROJECT_ID.iam.gserviceaccount.com'
+
+      # Alternative: Use Service Account Key JSON (ensure secret is properly configured)
+      - name: Authenticate to Google Cloud (SA Key)
+        id: auth
+        uses: google-github-actions/auth@v2 # Use latest major version
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }} # Ensure this secret exists
+
+      # --- GKE Access ---
+      # Use the dedicated action for getting GKE credentials
+      - name: Get GKE Credentials
+        uses: google-github-actions/get-gke-credentials@v1
+        with:
+          cluster_name: basic-gke-cluster       # Consider using vars or secrets
+          location: us-east1                  # Consider using vars or secrets
+          project_id: gen-lang-client-0683956833 # HIGHLY Recommended: Use vars.GCP_PROJECT_ID or secrets.GCP_PROJECT_ID
+
+      # --- Deployment ---
+      - name: Deploy Application to GKE
+        run: |
+          echo "Applying Kubernetes manifests from k8s/ directory..."
+          kubectl apply -f k8s/
+          echo "Checking rollout status..."
+          # Optional: Add a rollout status check for key deployments
+          # Replace 'your-deployment-name' with the actual name from your k8s files
+          # kubectl rollout status deployment/your-deployment-name --timeout=5m

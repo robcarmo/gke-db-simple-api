@@ -1,0 +1,45 @@
+name: Build and Push App Container
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'app/**'
+      - 'app/Dockerfile'
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v1
+        with:
+          version: 'latest'
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          export_environment_variables: true
+          create_credentials_file: true
+      - name: Configure Docker
+        run: |
+          gcloud auth configure-docker us-docker.pkg.dev
+
+      - name: Test GCP Authentication
+        run: |
+          echo "Testing GCP Authentication..."
+          gcloud artifacts repositories list --project=gen-lang-client-0683956833 --location=us
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v3
+        with:
+          context: ./app
+          push: true
+          tags: |
+            us-docker.pkg.dev/gen-lang-client-0683956833/hello-world/${{ github.sha }}
+            us-docker.pkg.dev/gen-lang-client-0683956833/hello-world/latest
