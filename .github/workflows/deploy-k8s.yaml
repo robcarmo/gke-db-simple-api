@@ -67,7 +67,7 @@ jobs:
       - name: Get GKE Credentials
         uses: google-github-actions/get-gke-credentials@v1
         with:
-          cluster_name: basic-gke-cluster       # Consider using vars or secrets
+          cluster_name: gke-cluster       # Consider using vars or secrets
           location: us-east1                  # Consider using vars or secrets
           project_id: gen-lang-client-0683956833 # HIGHLY Recommended: Use vars.GCP_PROJECT_ID or secrets.GCP_PROJECT_ID
 

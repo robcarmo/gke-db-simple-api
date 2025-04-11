@@ -6,7 +6,7 @@ on:
       cluster_name:
         description: 'GKE Cluster Name'
         required: true
-        default: 'basic-gke-cluster'
+        default: 'gke-cluster'
         type: string # Explicitly type inputs if desired
       location:
         description: 'GCP Region'
